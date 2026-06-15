@@ -726,6 +726,8 @@ function buildPurchaseXML(inv) {
             <DATE>${date}</DATE>
             <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
             <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
+            <REFERENCE>${xmlEscape(invoiceNo)}</REFERENCE>
+            <REFERENCEDATE>${date}</REFERENCEDATE>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
             <NARRATION>${xmlEscape(narration)}</NARRATION>
             <ISINVOICE>Yes</ISINVOICE>
@@ -775,6 +777,56 @@ function buildPurchaseXML(inv) {
   return envelope(voucher);
 }
 
+// function buildFreightXML(inv) {
+//   const party     = inv.party_name || 'Unknown Freight Agent';
+//   const invoiceNo = inv.invoice_no || '';
+//   const date      = fmtDate(inv.invoice_date);
+//   const cgst      = n(inv.cgst);
+//   const sgst      = n(inv.sgst);
+//   const igst      = n(inv.igst);
+//   const items = typeof inv.line_items === 'string'
+//     ? (() => { try { return JSON.parse(inv.line_items); } catch { return []; } })()
+//     : (inv.line_items || []);
+//   // Shipment rows on a courier bill are informational, NOT expense heads. The
+//   // whole bill books to ONE freight purchase ledger (intra=CGST+SGST → local,
+//   // inter=IGST). taxable_value is the freight base; fall back to the row sum
+//   // only if the extractor didn't capture a taxable_value.
+//   const freightLedger = inv.purchase_ledger || (igst > 0 ? FREIGHT_PURCHASE_INTER : FREIGHT_PURCHASE_LOCAL);
+//   const taxable = n(inv.taxable_value) || items.reduce((s, it) => s + n(it.amount), 0);
+//   const net     = taxable + cgst + sgst + igst;
+//   // Shipment references preserved in the narration for traceability (capped so a
+//   // long courier manifest doesn't overflow Tally's narration field).
+//   const shipmentRefs = items
+//     .map(it => (it.description || '').replace(/\s+/g, ' ').trim())
+//     .filter(Boolean)
+//     .slice(0, 20)
+//     .join('; ');
+//   const narration = [
+//     invoiceNo && `Inv: ${invoiceNo}`,
+//     inv.mawb_no && `MAWB: ${inv.mawb_no}`,
+//     inv.flight_no && `Flight: ${inv.flight_no}`,
+//     inv.commodity,
+//     shipmentRefs && `Shipments: ${shipmentRefs}`,
+//   ].filter(Boolean).join(' | ');
+//   const voucher = `<TALLYMESSAGE xmlns:UDF="TallyUDF">
+//           <VOUCHER VCHTYPE="Purchase" ACTION="Create"${invoiceNo ? ` REMOTEID="${invoiceNo}"` : ''}>
+//             <DATE>${date}</DATE>
+//             <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+//             <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
+//             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
+//             <NARRATION>${xmlEscape(narration)}</NARRATION>
+//             <ISINVOICE>Yes</ISINVOICE>
+//             <VCHENTRYMODE>As Voucher</VCHENTRYMODE>
+//             ${entry(freightLedger, true, taxable)}
+//             ${cgst > 0 ? entry(CGST_LEDGER, true, cgst) : ''}
+//             ${sgst > 0 ? entry(SGST_LEDGER, true, sgst) : ''}
+//             ${igst > 0 ? entry(IGST_LEDGER, true, igst) : ''}
+//             ${entry(party, false, net, true, invoiceNo || null)}
+//           </VOUCHER>
+//         </TALLYMESSAGE>`;
+//   return envelope(voucher);
+// }
+
 function buildFreightXML(inv) {
   const party     = inv.party_name || 'Unknown Freight Agent';
   const invoiceNo = inv.invoice_no || '';
@@ -785,20 +837,17 @@ function buildFreightXML(inv) {
   const items = typeof inv.line_items === 'string'
     ? (() => { try { return JSON.parse(inv.line_items); } catch { return []; } })()
     : (inv.line_items || []);
-  // Shipment rows on a courier bill are informational, NOT expense heads. The
-  // whole bill books to ONE freight purchase ledger (intra=CGST+SGST → local,
-  // inter=IGST). taxable_value is the freight base; fall back to the row sum
-  // only if the extractor didn't capture a taxable_value.
+
+  // Freight books to ONE purchase ledger (intra = CGST+SGST, inter = IGST).
+  // taxable_value is the freight base; fall back to row sum only if absent.
   const freightLedger = inv.purchase_ledger || (igst > 0 ? FREIGHT_PURCHASE_INTER : FREIGHT_PURCHASE_LOCAL);
   const taxable = n(inv.taxable_value) || items.reduce((s, it) => s + n(it.amount), 0);
   const net     = taxable + cgst + sgst + igst;
-  // Shipment references preserved in the narration for traceability (capped so a
-  // long courier manifest doesn't overflow Tally's narration field).
+
+  // Shipment refs → narration (capped so a long manifest doesn't overflow).
   const shipmentRefs = items
     .map(it => (it.description || '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .slice(0, 20)
-    .join('; ');
+    .filter(Boolean).slice(0, 20).join('; ');
   const narration = [
     invoiceNo && `Inv: ${invoiceNo}`,
     inv.mawb_no && `MAWB: ${inv.mawb_no}`,
@@ -806,20 +855,30 @@ function buildFreightXML(inv) {
     inv.commodity,
     shipmentRefs && `Shipments: ${shipmentRefs}`,
   ].filter(Boolean).join(' | ');
+
+  // Tally's OWN freight export = Accounting Invoice: party FIRST (positive,
+  // ISPARTYLEDGER, New Ref bill), then freight ledger + GST as NEGATIVE debits.
+  // (verified against Purchase_2025-26_1194.xml)
+  const partyEntry = invModeEntry(party, net, { isParty: true, billRef: invoiceNo || null });
+  const debitEntries =
+    invModeEntry(freightLedger, taxable) +
+    (cgst > 0 ? invModeEntry(CGST_LEDGER, cgst) : '') +
+    (sgst > 0 ? invModeEntry(SGST_LEDGER, sgst) : '') +
+    (igst > 0 ? invModeEntry(IGST_LEDGER, igst) : '');
+
   const voucher = `<TALLYMESSAGE xmlns:UDF="TallyUDF">
           <VOUCHER VCHTYPE="Purchase" ACTION="Create"${invoiceNo ? ` REMOTEID="${invoiceNo}"` : ''}>
             <DATE>${date}</DATE>
             <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
             <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
+            <REFERENCE>${xmlEscape(invoiceNo)}</REFERENCE>
+            <REFERENCEDATE>${date}</REFERENCEDATE>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
             <NARRATION>${xmlEscape(narration)}</NARRATION>
             <ISINVOICE>Yes</ISINVOICE>
-            <VCHENTRYMODE>As Voucher</VCHENTRYMODE>
-            ${entry(freightLedger, true, taxable)}
-            ${cgst > 0 ? entry(CGST_LEDGER, true, cgst) : ''}
-            ${sgst > 0 ? entry(SGST_LEDGER, true, sgst) : ''}
-            ${igst > 0 ? entry(IGST_LEDGER, true, igst) : ''}
-            ${entry(party, false, net, true, invoiceNo || null)}
+            <VCHENTRYMODE>Accounting Invoice</VCHENTRYMODE>
+            <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
+            ${partyEntry}${debitEntries}
           </VOUCHER>
         </TALLYMESSAGE>`;
   return envelope(voucher);
