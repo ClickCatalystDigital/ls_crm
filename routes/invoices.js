@@ -716,6 +716,7 @@ function buildPurchaseXML(inv) {
       (cgst > 0 ? invModeEntry(CGST_LEDGER, cgst) : '') +
       (sgst > 0 ? invModeEntry(SGST_LEDGER, sgst) : '') +
       (igst > 0 ? invModeEntry(IGST_LEDGER, igst) : '');
+    const partyEntry = invModeEntry(party, net, { isParty: true, billRef: invoiceNo || null });
     const voucher = `<TALLYMESSAGE xmlns:UDF="TallyUDF">
           <VOUCHER VCHTYPE="Purchase" ACTION="Create"${invoiceNo ? ` REMOTEID="${invoiceNo}"` : ''}>
             <DATE>${date}</DATE>
@@ -723,10 +724,10 @@ function buildPurchaseXML(inv) {
             <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
             <NARRATION>${xmlEscape(narration)}</NARRATION>
+            <ISINVOICE>Yes</ISINVOICE>
             <VCHENTRYMODE>Item Invoice</VCHENTRYMODE>
             <PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW>
-            ${lineEntries}${gstEntries}
-            ${invModeEntry(party, net, { isParty: true, billRef: invoiceNo || null })}
+            ${lineEntries}${partyEntry}${gstEntries}
           </VOUCHER>
         </TALLYMESSAGE>`;
     return envelope(voucher);
@@ -1403,8 +1404,6 @@ module.exports = router;
 
 
 
-
-
 // // routes/invoices.js
 // // Handles PDF upload, extraction, approval, and Tally XML generation.
 // // npm install multer
@@ -1794,6 +1793,12 @@ module.exports = router;
 //       }
 //       return;
 //     }
+//     // Goods purchases: tag lines as stock movements and auto-match each to a real
+//     // Tally stock item so the item-invoice builder fires. Weak matches are flagged
+//     // (needs_match) for the reviewer to fix via the stock-item dropdown.
+//     if (inv.doc_type === 'purchase_invoice') {
+//       await attachStockMatches(inv);
+//     }
 //     const xml = buildTallyXML(inv);
 //     await execute(
 //       `UPDATE crm_invoices SET
@@ -1868,6 +1873,72 @@ module.exports = router;
 //     if (d.includes(kw)) return ledger;
 //   }
 //   return DEFAULT_EXPENSE_LEDGER;
+// }
+
+// // ── Stock-item auto-matching ──────────────────────────────────────────────
+// // A supplier invoice line ("TANT CAP 1UF 35V 1206") rarely equals the Tally
+// // stock-item name ("SMD Tan Cap : 1uF 35v 1206 (A)"). We match by shared
+// // distinctive tokens — value tokens (those containing a digit: 1UF, 35V, 1206)
+// // are the real discriminators, so they count double. The review-screen dropdown
+// // is the fallback for anything that doesn't auto-match confidently.
+// const STOCK_MATCH_MIN_SCORE = 3;   // need at least this weighted token overlap
+// const _STOP_TOKENS = new Set(['THE','AND','FOR','PCS','NOS','QTY','SMD','CAP']);
+
+// function _stockTokens(s) {
+//   return String(s || '')
+//     .toUpperCase()
+//     .replace(/[^A-Z0-9.±%]/g, ' ')
+//     .split(/\s+/)
+//     .filter(t => t && t.length >= 2 && !_STOP_TOKENS.has(t));
+// }
+
+// function _scoreStockMatch(descTokens, itemName) {
+//   const itemTokens = new Set(_stockTokens(itemName));
+//   let score = 0;
+//   for (const t of descTokens) {
+//     if (itemTokens.has(t)) score += /\d/.test(t) ? 2 : 1;
+//   }
+//   return score;
+// }
+
+// // Returns { name, score } of the best Tally stock item, or null if nothing
+// // clears the confidence threshold. hsn match adds a point.
+// function matchStockItem(description, hsn, stockItems) {
+//   const descTokens = _stockTokens(description);
+//   if (!descTokens.length) return null;
+//   let best = null, bestScore = 0;
+//   for (const it of stockItems) {
+//     let s = _scoreStockMatch(descTokens, it.name);
+//     if (hsn && it.hsn_code && String(it.hsn_code).trim() === String(hsn).trim()) s += 1;
+//     if (s > bestScore) { bestScore = s; best = it; }
+//   }
+//   if (!best || bestScore < STOCK_MATCH_MIN_SCORE) return null;
+//   return { name: best.name, score: bestScore };
+// }
+
+// // Mutates inv.line_items in place: marks goods lines kind:'stock' and pre-fills
+// // stock_item_name from the best Tally match. Lines that don't match confidently
+// // keep an empty stock_item_name + needs_match:true so the reviewer can pick one.
+// // A line already carrying a stock_item_name (e.g. user-corrected) is left alone.
+// async function attachStockMatches(inv) {
+//   const items = Array.isArray(inv.line_items) ? inv.line_items : [];
+//   if (!items.length) return;
+//   let stockItems = [];
+//   try { stockItems = await queryAll('SELECT name, parent, hsn_code FROM crm_tally_stock_items'); }
+//   catch { stockItems = []; }
+//   inv.line_items = items.map(it => {
+//     if (it.stock_item_name) {                       // already matched/confirmed — leave it
+//       return { ...it, kind: 'stock', needs_match: false };
+//     }
+//     const m = stockItems.length ? matchStockItem(it.description, it.hsn, stockItems) : null;
+//     return {
+//       ...it,
+//       kind: 'stock',
+//       stock_item_name: m ? m.name : '',
+//       stock_match_score: m ? m.score : 0,
+//       needs_match: !m,
+//     };
+//   });
 // }
 
 // function fmtDate(raw) {
@@ -2728,105 +2799,6 @@ module.exports = router;
 //     console.error('Line attachment streaming crashed:', err.message);
 //     res.status(500).json({ error: 'Failed to preserve attachment: ' + err.message });
 //   }
-// });
-
-// // ── Bank reconciliation (read-only) ─────────────────────────────────────
-// // Matches a statement's transactions against Tally Receipt/Payment vouchers
-// // (crm_tally_bank_txns) for the SAME bank ledger, with tiered confidence.
-// const MATCH_WINDOW_DAYS  = 3;   // auto-match window
-// const REVIEW_WINDOW_DAYS = 10;  // beyond this, an amount-only collision is just noise → unmatched
-
-// function _extractRef(desc) {
-//   const s = String(desc || '').toUpperCase().replace(/\s+/g, ' ');
-//   const upi = s.match(/UPI\/(\d{12})/);                 if (upi) return upi[1];
-//   const pfx = s.match(/(?:NEFT|RTGS|IMPS)[-/ ]?([A-Z0-9]{8,})/); if (pfx) return pfx[1];
-//   const raw = s.match(/\b([A-Z]{4}[RN]\d{8,16})\b/);    if (raw) return raw[1];
-//   return null;
-// }
-// const _round2 = x => Math.round((parseFloat(x) || 0) * 100) / 100;
-// function _daysBetween(a, b) {
-//   const da = new Date(a + 'T00:00:00'), db = new Date(b + 'T00:00:00');
-//   if (isNaN(da) || isNaN(db)) return 9999;
-//   return Math.abs(Math.round((da - db) / 86400000));
-// }
-
-// function reconcileLines(lines, candidates) {
-//   const pool = candidates.map(c => ({
-//     voucher_no: c.voucher_no,
-//     type: (c.voucher_type || '').trim(),            // Receipt / Payment
-//     date: c.date || '',
-//     amt:  _round2(Math.abs(c.amount)),
-//     hay:  `${c.narration || ''} ${c.bill_refs || ''}`.toUpperCase(),
-//     consumed: false,
-//   }));
-
-//   const out = lines.map((li, i) => ({
-//     ...li, _idx: i,
-//     match: { status: 'unmatched', voucher_no: null, voucher_date: null },
-//   }));
-//   const work  = out.filter(o => _round2(Math.abs(o.amount)) > 0);
-//   const dirOf = o => (parseFloat(o.amount) >= 0 ? 'Receipt' : 'Payment');
-//   const amtOf = o => _round2(Math.abs(o.amount));
-//   const pickable = o => pool.filter(c => !c.consumed && c.type === dirOf(o) && c.amt === amtOf(o));
-
-//   // A — reference-confirmed (UTR/UPI/RRN found in the Tally narration)
-//   for (const o of work) {
-//     const ref = _extractRef(o.description);
-//     if (!ref) continue;
-//     const hit = pickable(o).find(c => c.hay.includes(ref.toUpperCase()));
-//     if (hit) { hit.consumed = true; o.match = { status: 'confirmed', voucher_no: hit.voucher_no, voucher_date: hit.date, ref }; }
-//   }
-//   // B — same ledger + exact amount + exact date (unique)
-//   for (const o of work) {
-//     if (o.match.status !== 'unmatched') continue;
-//     const ex = pickable(o).filter(c => c.date === o.date);
-//     if (ex.length === 1) { ex[0].consumed = true; o.match = { status: 'high', voucher_no: ex[0].voucher_no, voucher_date: ex[0].date }; }
-//   }
-//   // C — same ledger + amount + within ±window, exactly one candidate
-//   for (const o of work) {
-//     if (o.match.status !== 'unmatched') continue;
-//     const near = pickable(o).filter(c => _daysBetween(c.date, o.date) <= MATCH_WINDOW_DAYS);
-//     if (near.length === 1) { near[0].consumed = true; o.match = { status: 'matched', voucher_no: near[0].voucher_no, voucher_date: near[0].date }; }
-//   }
-
-//   // (no "review" tier — a transaction is either a confident match or "not in Tally")
-//   // D — amount matches within a bounded window but not uniquely auto-matchable → manual review
-//   // for (const o of work) {
-//   //   if (o.match.status !== 'unmatched') continue;
-//   //   const near = pickable(o).filter(c => _daysBetween(c.date, o.date) <= REVIEW_WINDOW_DAYS);
-//   //   if (near.length > 0) o.match = { status: 'review', voucher_no: null, voucher_date: null };
-//   // }
-
-//   const summary = { confirmed: 0, high: 0, matched: 0, review: 0, unmatched: 0 };
-//   for (const o of work) summary[o.match.status]++;
-//   return { lines: out, summary };
-// }
-
-// router.get('/:id/reconcile', async (req, res) => {
-//   const inv = await queryOne(
-//     "SELECT id, doc_type, account_no, bank_ledger, line_items FROM crm_invoices WHERE id = ?",
-//     [req.params.id]);
-//   if (!inv) return res.status(404).json({ error: 'Not found' });
-//   if (inv.doc_type !== 'bank_statement') return res.status(400).json({ error: 'Not a bank statement' });
-
-//   let bankLedger = inv.bank_ledger || null;
-//   if (!bankLedger && inv.account_no) {
-//     const m = await queryOne("SELECT bank_ledger FROM crm_bank_accounts WHERE account_no = ?", [inv.account_no]);
-//     bankLedger = m ? m.bank_ledger : null;
-//   }
-//   if (!bankLedger)
-//     return res.json({ bank_ledger: null, summary: {}, lines: [],
-//       note: 'No bank ledger mapped for this account_no — add it to crm_bank_accounts.' });
-
-//   let lines = [];
-//   try { lines = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []); } catch { lines = []; }
-
-//   const candidates = await queryAll(
-//     "SELECT voucher_no, voucher_type, date, amount, narration, bill_refs FROM crm_tally_bank_txns WHERE bank_ledger = ?",
-//     [bankLedger]);
-
-//   const { lines: enriched, summary } = reconcileLines(lines, candidates);
-//   res.json({ bank_ledger: bankLedger, candidate_count: candidates.length, summary, lines: enriched });
 // });
 
 // module.exports = router;
