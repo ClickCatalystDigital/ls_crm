@@ -725,8 +725,7 @@ function buildPurchaseXML(inv) {
           <VOUCHER VCHTYPE="Purchase" ACTION="Create"${invoiceNo ? ` REMOTEID="${invoiceNo}"` : ''}>
             <DATE>${date}</DATE>
             <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
-            <REFERENCE>${xmlEscape(invoiceNo)}</REFERENCE>
-            <REFERENCEDATE>${date}</REFERENCEDATE>
+            <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
             <NARRATION>${xmlEscape(narration)}</NARRATION>
             <ISINVOICE>Yes</ISINVOICE>
