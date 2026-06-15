@@ -1724,9 +1724,10 @@
           ${(inv.doc_type === 'freight_invoice' || inv.doc_type === 'bill_of_entry') ? `
           <div class="rv-section-label">Freight / shipment details</div>
           <div class="rv-grid">${FREIGHT_FIELDS.map(f => fld(f, inv[f.k])).join('')}</div>` : ''}
+          ${inv.doc_type !== 'freight_invoice' ? `
           <div class="rv-section-label">Line items</div>
           <div id="rvLines"></div>
-          ${_rvLocked ? '' : '<button class="rv-line-add" onclick="rvAddLine()">+ Add line item</button>'}
+          ${_rvLocked ? '' : '<button class="rv-line-add" onclick="rvAddLine()">+ Add line item</button>'}` : ''}
           <div class="rv-section-label">Custom fields</div>
           <div id="rvCustomFields"></div>
           ${_rvLocked ? '' : `<div class="rv-add-row">

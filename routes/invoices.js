@@ -57,6 +57,10 @@ const IGST_LEDGER        = 'IGST';
 const IGST_IMPORT_LEDGER = 'IGST Paid on Import';
 const CUSTOMS_DUTY_LEDGER= 'Custom Duty / Import Duty';
 const FREIGHT_IMPORT_LDG = 'Freight on Import';
+// Freight bought as a purchase-invoice (single ledger, not multiple expense heads).
+// Intra-state = CGST+SGST, inter-state = IGST. Names must match Tally exactly.
+const FREIGHT_PURCHASE_LOCAL = 'GST Local Purchase of Freight 18%';
+const FREIGHT_PURCHASE_INTER = 'GST Local Purchase of Freight 18%';
 const INSURANCE_IMPORT_LDG='Insurance on Import';
 const PURCHASE_LOCAL     = 'GST LOCAL PURCHASE 18%';
 const PURCHASE_INTRA     = 'GST INTRA STATE PURCHASE 18%';
@@ -139,8 +143,8 @@ ${SCHEMA_BLOCK}
 Rules:
 - doc_type is "freight_invoice".
 - ${PARTY_RULE}
-- This is a freight/logistics bill — expect MAWB, flight no., airport codes, CFS / agency / handling charges. Capture mawb_no, flight_no, origin_airport, dest_airport, commodity, gross_weight where present.
-- Each charge line → line_item with its description and amount (these map to expense ledgers downstream).
+- This is a freight/logistics/courier bill — expect MAWB, flight no., airport codes, CFS / agency / handling charges. Capture mawb_no, flight_no, origin_airport, dest_airport, commodity, gross_weight where present.
+- The whole bill books to a SINGLE freight purchase ledger, so DO NOT itemise individual charge heads. Return line_items as an EMPTY array []. Capture the pre-tax freight total in taxable_value, the taxes in cgst/sgst/igst, and net_amount as the final payable.
 - ${NUM_RULE}`,
 
   bill_of_entry: `You are a precise data extraction system for Indian customs Bills of Entry.
@@ -721,7 +725,8 @@ function buildPurchaseXML(inv) {
           <VOUCHER VCHTYPE="Purchase" ACTION="Create"${invoiceNo ? ` REMOTEID="${invoiceNo}"` : ''}>
             <DATE>${date}</DATE>
             <VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
-            <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
+            <REFERENCE>${xmlEscape(invoiceNo)}</REFERENCE>
+            <REFERENCEDATE>${date}</REFERENCEDATE>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
             <NARRATION>${xmlEscape(narration)}</NARRATION>
             <ISINVOICE>Yes</ISINVOICE>
@@ -781,18 +786,26 @@ function buildFreightXML(inv) {
   const items = typeof inv.line_items === 'string'
     ? (() => { try { return JSON.parse(inv.line_items); } catch { return []; } })()
     : (inv.line_items || []);
-  const itemsSum = items.length > 0
-    ? items.reduce((s, it) => s + n(it.amount), 0)
-    : n(inv.taxable_value);
-  const net       = itemsSum + cgst + sgst + igst;
-  const expenseEntries = items.length > 0
-    ? items.map(it => entry(resolveLedger(it.description || ''), true, n(it.amount))).join('')
-    : entry(DEFAULT_EXPENSE_LEDGER, true, n(inv.taxable_value));
+  // Shipment rows on a courier bill are informational, NOT expense heads. The
+  // whole bill books to ONE freight purchase ledger (intra=CGST+SGST → local,
+  // inter=IGST). taxable_value is the freight base; fall back to the row sum
+  // only if the extractor didn't capture a taxable_value.
+  const freightLedger = inv.purchase_ledger || (igst > 0 ? FREIGHT_PURCHASE_INTER : FREIGHT_PURCHASE_LOCAL);
+  const taxable = n(inv.taxable_value) || items.reduce((s, it) => s + n(it.amount), 0);
+  const net     = taxable + cgst + sgst + igst;
+  // Shipment references preserved in the narration for traceability (capped so a
+  // long courier manifest doesn't overflow Tally's narration field).
+  const shipmentRefs = items
+    .map(it => (it.description || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .join('; ');
   const narration = [
     invoiceNo && `Inv: ${invoiceNo}`,
     inv.mawb_no && `MAWB: ${inv.mawb_no}`,
     inv.flight_no && `Flight: ${inv.flight_no}`,
     inv.commodity,
+    shipmentRefs && `Shipments: ${shipmentRefs}`,
   ].filter(Boolean).join(' | ');
   const voucher = `<TALLYMESSAGE xmlns:UDF="TallyUDF">
           <VOUCHER VCHTYPE="Purchase" ACTION="Create"${invoiceNo ? ` REMOTEID="${invoiceNo}"` : ''}>
@@ -801,7 +814,9 @@ function buildFreightXML(inv) {
             <VOUCHERNUMBER>${xmlEscape(invoiceNo)}</VOUCHERNUMBER>
             <PARTYLEDGERNAME>${xmlEscape(party)}</PARTYLEDGERNAME>
             <NARRATION>${xmlEscape(narration)}</NARRATION>
-            ${expenseEntries}
+            <ISINVOICE>Yes</ISINVOICE>
+            <VCHENTRYMODE>As Voucher</VCHENTRYMODE>
+            ${entry(freightLedger, true, taxable)}
             ${cgst > 0 ? entry(CGST_LEDGER, true, cgst) : ''}
             ${sgst > 0 ? entry(SGST_LEDGER, true, sgst) : ''}
             ${igst > 0 ? entry(IGST_LEDGER, true, igst) : ''}
