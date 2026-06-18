@@ -359,20 +359,21 @@ router.get('/:id', async (req, res) => {
 // UPDATE — only allowed on draft or confirmed
 router.patch('/:id', async (req, res) => {
   const po = await queryOne(
-    'SELECT status FROM crm_purchase_orders WHERE id = ?',
+    'SELECT status, company_id FROM crm_purchase_orders WHERE id = ?',
     [req.params.id]
   );
   if (!po) return res.status(404).json({ error: 'PO not found' });
   if (['dispatched', 'cancelled'].includes(po.status))
     return res.status(400).json({ error: `Cannot edit a ${po.status} PO` });
 
-  const { contact_id, order_date, expected_dispatch_date, notes } = req.body;
+  const { company_id, contact_id, order_date, expected_dispatch_date, notes } = req.body;
   await execute(
     `UPDATE crm_purchase_orders
-     SET contact_id = ?, order_date = ?, expected_dispatch_date = ?,
+     SET company_id = ?, contact_id = ?, order_date = ?, expected_dispatch_date = ?,
          notes = ?, updated_at = ?
      WHERE id = ?`,
-    [contact_id || null, order_date || null,
+    [company_id ? parseInt(company_id) : po.company_id,
+     contact_id || null, order_date || null,
      expected_dispatch_date || null, notes || null, nowIST(), req.params.id]
   );
   res.json({ success: true });

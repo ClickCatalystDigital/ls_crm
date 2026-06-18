@@ -687,6 +687,7 @@ async function openPO(id) {
   document.getElementById('rvFoot').innerHTML = '';
   try {
     await cdEnsureItems();
+    if (!_poCompanies.length) try { _poCompanies = await api('/api/po/companies'); } catch(e) {}
     const po = await api(`/api/po/${id}`);
     _po = po; _poEditable = ['draft', 'confirmed'].includes(po.status);
 
@@ -755,10 +756,17 @@ async function openPO(id) {
     })();
 
     document.getElementById('rvBody').innerHTML = `
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;">
-        <span>${esc(po.company_name||'')}${po.poc_name?' · '+esc(po.poc_name):''}</span>
-        ${totalValue > 0 ? `<span style="font-weight:700;color:var(--text);font-size:13px;">₹${totalValue.toLocaleString('en-IN',{minimumFractionDigits:2})}</span>` : ''}
-      </div>
+      ${_poEditable ? `
+      <div class="rv-field" style="margin-bottom:14px;">
+        <label>Supplier</label>
+        <div id="cd_po_company" data-value="${esc(String(po.company_id||''))}">
+          <button class="cd-trigger" onclick="cdToggle('cd_po_company')">
+            <span class="cd-value">${esc(po.company_name||'— Select supplier —')}</span>
+            <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0;"><path stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="cd-panel" style="display:none;"></div>
+        </div>
+      </div>` : `<div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;"><span>${esc(po.company_name||'')}${po.poc_name?' · '+esc(po.poc_name):''}</span>${totalValue > 0 ? `<span style="font-weight:700;color:var(--text);font-size:13px;">₹${totalValue.toLocaleString('en-IN',{minimumFractionDigits:2})}</span>` : ''}</div>`}
       <div class="rv-grid" style="margin-bottom:14px;">
         <div class="rv-field"><label>Order Date</label><input type="date" id="po_order_date" value="${po.order_date||''}" ${_poEditable?'':'disabled'}></div>
         <div class="rv-field"><label>Expected Delivery</label><input type="date" id="po_exp_delivery" value="${po.expected_dispatch_date||''}" ${_poEditable?'':'disabled'}></div>
@@ -770,6 +778,10 @@ async function openPO(id) {
       ${_poEditable ? `<button class="rv-line-add" style="margin-top:8px;" onclick="poAddLine(${po.id})">+ Add line item</button>` : ''}
       ${outwardsHtml}
       ${relInvHtml}`;
+
+    if (_poEditable) cdMount('cd_po_company', _poCompanies,
+      c => ({ value: String(c.id), primary: c.name, secondary: '' }),
+      null, '— Select supplier —');
 
     const foot      = document.getElementById('rvFoot');
     const canCancel = _poUser && ['admin','manager'].includes(_poUser.role)
@@ -850,10 +862,13 @@ async function poAddLine(poId) {
 
 async function poSaveHeader(poId) {
   try {
-    await api(`/api/po/${poId}`, { method:'PATCH', body:{
+    const body = {
       order_date: document.getElementById('po_order_date')?.value || null,
       expected_dispatch_date: document.getElementById('po_exp_delivery')?.value || null,
-    }});
+    };
+    const companyEl = document.getElementById('cd_po_company');
+    if (companyEl) body.company_id = parseInt(companyEl.dataset.value) || null;
+    await api(`/api/po/${poId}`, { method:'PATCH', body });
     showToast('Saved'); _loadPOs();
   } catch(e) { showToast('Save failed', 'error'); }
 }
