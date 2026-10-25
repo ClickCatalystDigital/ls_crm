@@ -11,7 +11,7 @@ Usage:
     python seed_demo.py
 """
 
-import json, sys
+import json, os, sys
 from datetime import datetime, timedelta
 
 try:
@@ -28,8 +28,12 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────
 #  TURSO CONNECTION
 # ─────────────────────────────────────────────────────────────
-TURSO_URL   = "https://demo-rock77.aws-ap-south-1.turso.io"
-TURSO_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODA1MTAyMTYsImlkIjoiMDE5ZThlYTktMDQwMS03MjVjLWFmZTEtZjcwYzExNWNiNzMzIiwicmlkIjoiOGNmMjQ2ZTktYWJjMi00Nzg0LTk4MzktZDY1NThlMDIyNWY0In0.LAuSHRzAyjt-8bnJFlOXUGUT9acfGt11IMBwaaslyLdRqRCkLiO2zhpOY1SJTXrY-yH596vAG9z-kGk__RUBBg"
+# Read from the environment, never typed here: a token committed to this file was public and has been revoked.
+#   TURSO_URL=https://<db>-<org>.<region>.turso.io  TURSO_TOKEN=<token>  python seed_demo.py
+TURSO_URL   = os.environ.get("TURSO_URL", "").replace("libsql://", "https://")
+TURSO_TOKEN = os.environ.get("TURSO_TOKEN", "")
+if not TURSO_URL or not TURSO_TOKEN:
+    sys.exit("Set TURSO_URL and TURSO_TOKEN in the environment first.")
 
 
 # ─────────────────────────────────────────────────────────────
